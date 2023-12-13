@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aws_login"
+version = "0.1.0"
+authors = [{name = "Dave Heller", email = "techrules@pm.me"}]
+description = "A simple tool to dump session credentials or open the AWS Management Console as a given user identity"
+dependencies = ["boto3","pyperclip","urllib3","requests"]
+requires-python = ">=3.7"
+keywords = ["aws", "sso"]
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+aws-login = "aws_login.aws_login:main"
+
+[project.urls]
+"Homepage" = " https://github.com/hellerda/aws-login"
+"Bug Tracker" = " https://github.com/hellerda/aws-login/issues"
+

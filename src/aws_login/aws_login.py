@@ -340,7 +340,7 @@ class AWSContextManager:
 # --------------------------------------------------------------------------------------------------
 # Main...
 # --------------------------------------------------------------------------------------------------
-def main():
+def run():
 
     cmds_usage = '''\nAvailable commands:
     console
@@ -609,7 +609,7 @@ def main():
 
 
 
-if __name__ == '__main__':
+def main():
     rc = 0
 
     try:
@@ -621,7 +621,7 @@ if __name__ == '__main__':
 
         logging.basicConfig(level=LOGLEVEL)
 
-        rc = main()
+        rc = run()
 
     except KeyboardInterrupt:
         print('Killed by keyboard interrupt.')
@@ -635,4 +635,8 @@ if __name__ == '__main__':
         rc = 1
         exit(rc)
 
-    sys.exit(rc)
+    return(rc)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -338,7 +338,7 @@ class AWSContextManager:
 
 
 # --------------------------------------------------------------------------------------------------
-# Main...
+# Run...
 # --------------------------------------------------------------------------------------------------
 def run():
 
@@ -348,7 +348,7 @@ def run():
     dumpconfig
     '''.rstrip()
 
-    usage = 'usage: %prog command [options]\n   ex: %prog create-group --group_name MyGroup\n'
+    usage = 'usage: %prog command [options]\n   ex: %prog console --profile "mySessionProfile"\n'
     parser = OptionParser(usage + cmds_usage)
     global options
 
@@ -425,28 +425,47 @@ def run():
         'sessionToken': None
     }
 
-    # If user provides start url, do full sso login...
-    if (operation != 'dumpconfig' and options.start_url != None):
+    if (operation != 'dumpconfig'):
 
-        if (options.start_url == None or
-            options.sso_region == None or
-            options.sso_acct_id == None or
-            options.sso_role_name == None):
-            print('Must provide --start-url, --sso-region, --sso-acct-id and --sso-role-name to do SSO login.')
-            exit(1)
+        # If user provides start url, do full sso login.
+        if (options.start_url != None):
 
-        role_credentials = get_oidc_role_credentials(do_sso_login())
+            if (options.sso_region == None or
+                options.sso_acct_id == None or
+                options.sso_role_name == None):
+                print('Must provide --start-url, --sso-region, --sso-acct-id and --sso-role-name to do SSO login.')
+                exit(1)
 
-    # If user provides accessToken, get session creds using this token...
-    elif (operation != 'dumpconfig' and options.sso_access_token != None):
+            role_credentials = get_oidc_role_credentials(do_sso_login())
 
-        if (options.sso_access_token == None or
-            options.sso_acct_id == None or
-            options.sso_role_name == None):
-            print('Must provide --sso-acct-id and --sso-role-name to get creds with accessToken.')
-            exit(1)
+        # If user provides accessToken, skip SSO login and use token.
+        elif (options.sso_access_token != None):
 
-        role_credentials = get_oidc_role_credentials(options.sso_access_token)
+            if (options.sso_acct_id == None or
+                options.sso_role_name == None):
+                print('Must provide --sso-acct-id and --sso-role-name to get creds with accessToken.')
+                exit(1)
+
+            role_credentials = get_oidc_role_credentials(options.sso_access_token)
+
+    elif (operation == 'dumpconfig'):
+
+        if (options.sso_access_token == None):
+
+            # User must provide start url in this case, as we'll need it to get accessToken.
+            if (options.start_url == None):
+                print('Must minimally provide --start-url or --sso-access-token to proceed.')
+                exit(1)
+            else:
+                if (options.sso_region == None):
+                    print('Must provide --sso-region with --start-url.')
+                    exit(1)
+                options.sso_access_token = do_sso_login()
+
+        else:
+
+            # accessToken already stored in options.
+            pass
 
 
     # ----------------------------------------------------------------------------------------------
@@ -459,10 +478,11 @@ def run():
                            ) as ctx:
 
         # We should have credentials by this point, if not:
-        credentials = ctx.session.get_credentials()
-        if not hasattr(credentials, 'access_key'):
-            print('Cannot find not find any session credentials, unable continue.')
-            exit(1)
+        if operation != 'dumpconfig':
+            credentials = ctx.session.get_credentials()
+            if not hasattr(credentials, 'access_key'):
+                print('Cannot find not find any session credentials, unable continue.')
+                exit(1)
 
         # If the user opts for get-session-token, do that next
         if (options.get_session_token == True):
@@ -524,22 +544,9 @@ def run():
         # ------------------------------------------------------------------------------------------
         elif operation == 'dumpconfig':
 
-            accessToken = ''
+            accessToken = options.sso_access_token
             ssoSessionName = options.sso_session_name
             startURL = options.start_url
-
-            # If user provides accessToken here, the intent is is to use it in lieu of full SSO login.
-            # User SHOULD additionally provide start URL, but if not we will fill in a placeholder
-            if (options.sso_access_token != None):
-                accessToken = options.sso_access_token
-
-            else:
-                # User MUST provide start url in this case, as we'll need it to get accessToken.
-                if (options.start_url == None):
-                    print('Must minimally provide --start-url or --sso-access-token to proceed.')
-                    exit(1)
-                accessToken = do_sso_login()
-
 
             print('======== ADD THE FOLLOWING TO YOUR .aws/config FILE ========')
 
@@ -609,6 +616,9 @@ def run():
 
 
 
+# --------------------------------------------------------------------------------------------------
+# Main...
+# --------------------------------------------------------------------------------------------------
 def main():
     rc = 0
 
@@ -636,6 +646,7 @@ def main():
         exit(rc)
 
     return(rc)
+
 
 
 if __name__ == '__main__':

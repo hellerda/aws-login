@@ -345,6 +345,7 @@ def run():
     cmds_usage = '''\nAvailable commands:
     console
     dumpcreds
+    getcallerid
     dumpconfig
     '''.rstrip()
 
@@ -391,6 +392,8 @@ def run():
         if op == 'console':
             operation = op
         elif op == 'dumpcreds':
+            operation = op
+        elif op == 'getcallerid':
             operation = op
         elif op == 'dumpconfig':
             operation = op
@@ -532,6 +535,16 @@ def run():
             print("# Your session credentials are...\n" + dumpcreds)
 
             copy_url_to_clipboard(dumpcreds)
+
+
+        elif operation == 'getcallerid':
+
+            sts_client = ctx.session.client('sts')
+
+            response = sts_client.get_caller_identity()
+
+            response.pop('ResponseMetadata')
+            print(json.dumps(response, indent=4, sort_keys=False, default=str))
 
 
         # ------------------------------------------------------------------------------------------

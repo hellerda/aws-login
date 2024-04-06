@@ -6,7 +6,7 @@ A simple tool to dump session credentials or open the AWS Management Console as 
 
 Can get credentials from env, or named config, or SSO login.
 
-(c) Copyright Dave Heller 2023
+(c) Copyright Dave Heller 2024
 '''
 
 import boto3
@@ -161,17 +161,25 @@ def copy_url_to_clipboard(url):
 
 def do_sso_login():
     '''
-    Do the full AWS SSO login and get session credentials for the specified acct and SSO role.
+    Do the full AWS SSO login and return accessToken.
     '''
 
     # Create an SSO OIDC client
     sso_oidc = boto3.client('sso-oidc', region_name=options.sso_region)
 
     # Register the client
-    client = sso_oidc.register_client(
-        clientName = 'aws-login.py',
-        clientType ='public'
-    )
+    if options.nrt == True:
+        # Crude way to request non-refreshable accessToken.
+        client = sso_oidc.register_client(
+            clientName = 'aws-login.py',
+            clientType = 'public'
+        )
+    else:
+        client = sso_oidc.register_client(
+            clientName = 'aws-login.py',
+            clientType = 'public',
+            scopes = ['sso:account:access']
+        )
 
     # Get the client ID and client secret from the response
     client_id = client.get('clientId')
@@ -225,7 +233,25 @@ def do_sso_login():
 
     # Get the accessToken from the response
     accessToken = token_response.get('accessToken')
-    print()
+    token_response.pop('ResponseMetadata')
+
+    if (options.use_cache == True):
+        expiry = datetime.datetime.utcnow(
+        ) + datetime.timedelta(seconds=token_response['expiresIn'])
+
+        cache = {}
+        cache['startUrl'] = options.start_url
+        cache['region'] = options.sso_region
+        cache['clientId'] = client['clientId']
+        cache['clientSecret'] = client['clientSecret']
+        cache['accessToken'] = token_response['accessToken']
+        cache['expiresIn'] = token_response['expiresIn']
+        cache['expiresAt'] = expiry.strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
+        if 'refreshToken' in token_response:
+            cache['refreshToken'] = token_response['refreshToken']
+
+        # Write the cache file...
+        write_accesstoken_cache(cache)
 
     return accessToken
 
@@ -239,11 +265,45 @@ def get_oidc_role_credentials(accessToken):
     sso_client = boto3.client('sso', region_name=options.sso_region)
 
     # Get session credentials for an SSO role in an account
-    response = sso_client.get_role_credentials(
-        accessToken = accessToken,
-        accountId = options.sso_acct_id,
-        roleName = options.sso_role_name
-    )
+    # Now with autorefresh support.
+    refresh_tried = False
+    response = {}
+    while True:
+
+        try:
+            response = sso_client.get_role_credentials(
+                accessToken = accessToken,
+                accountId = options.sso_acct_id,
+                roleName = options.sso_role_name
+            )
+
+        except sso_client.exceptions.UnauthorizedException as e:
+            print('Error (%s) %s' % (e.__class__.__name__, e))
+
+            if options.refresh == 'off':
+                exit(1)
+
+            if options.accesstoken_cache == None:
+                raise SystemExit('Sorry, no autorefesh available :-(')
+
+            if refresh_tried == True:
+                print('Look, we already did accessToken refresh and still we get:')
+                raise SystemExit('Error: accessToken not valid: (%s) %s' % (
+                    e.__class__.__name__, e))
+
+            print('Trying auto-refresh...')
+            refresh_tried = True
+            try:
+                accessToken = do_accesstoken_refresh()
+            except Exception as ee:
+                raise SystemExit('Error: accessToken refresh failed: (%s) %s' % (
+                    ee.__class__.__name__, ee))
+
+        except Exception as e:
+            raise SystemExit('Error (%s) %s' % (e.__class__.__name__, e))
+
+        else:
+            break
 
     # Get the credentials from the JSON response
     role_credentials = response['roleCredentials']
@@ -251,7 +311,7 @@ def get_oidc_role_credentials(accessToken):
     return role_credentials
 
 
-def read_list_fom_input(input_name, input_value):
+def read_list_fom_input(option_name, input_value):
 
     output_list = []
     payload = ''
@@ -259,7 +319,7 @@ def read_list_fom_input(input_name, input_value):
     if input_value != None:
 
         if (input_value == ''):
-            raise ValueError('Error: empty value passed to "%s".' % input_name)
+            raise ValueError('Error: empty value passed to "%s".' % option_name)
 
         loc = input_value.split('file://')
 
@@ -270,7 +330,7 @@ def read_list_fom_input(input_name, input_value):
             payload = open(loc[1], 'rt').read()
 
         elif (len(loc) > 2):
-            raise ValueError('Error: unable to parse the value passed to "%s".' % input_name)
+            raise ValueError('Error: unable to parse the value passed to "%s".' % option_name)
 
         try:
             # Valid JSON?
@@ -281,6 +341,193 @@ def read_list_fom_input(input_name, input_value):
             output_list = ''.join(payload.split()).split(',')
 
     return output_list
+
+
+def read_dict_from_input(option_name, input_value):
+
+    output_dict = {}
+    payload = ''
+
+    if input_value != None:
+
+        if (input_value == ''):
+            raise ValueError('Error: empty value passed to "%s".' % option_name)
+
+        loc = input_value.split('file://')
+
+        if (len(loc) == 1):
+            payload = loc[0]
+
+        elif (len(loc) == 2):
+            payload = open(loc[1], 'rt').read()
+
+        elif (len(loc) > 2):
+            raise ValueError('Error: unable to parse the value passed to "%s".' % option_name)
+
+        try:
+            # Valid JSON?
+            output_dict = json.loads(payload)
+
+        except json.JSONDecodeError:
+            raise ValueError('Error: input to "%s" must be valid JSON.' % option_name)
+
+    return output_dict
+
+
+def read_accesstoken_cache():
+    '''
+    Read the cached data into a python dict.
+    '''
+
+    cached_data = {}
+
+    if options.accesstoken_cache == None:
+        raise ValueError('Error: Need cache file to proceed; use --accesstoken-cache.')
+
+    try:
+        cached_data = read_dict_from_input('--accesstoken-cache', options.accesstoken_cache)
+    except FileNotFoundError as e:
+        raise SystemExit('Can\'t find the cache file, has it been created?')
+    except Exception as e:
+        raise SystemExit('Error (%s): cannot read cache: %s' % (
+            e.__class__.__name__, e))
+
+    if not isinstance(cached_data, dict):
+        raise ValueError('Input to --accesstoken-cache must be a dict.')
+
+    if cached_data == {}:
+        raise ValueError('Input to --accesstoken-cache appears to be empty.')
+
+    return cached_data
+
+
+def get_cached_accesstoken():
+    '''
+    Read accessToken (and region) from the cache.
+    '''
+
+    cached_data = read_accesstoken_cache()
+
+    try:
+        cached_accessToken = cached_data['accessToken']
+    except KeyError as e:
+        raise SystemExit('Error (%s) %s is missing from the cache file.' % (
+            e.__class__.__name__, e))
+
+    options.sso_region = cached_data['region']
+
+    return cached_accessToken
+
+
+def do_accesstoken_refresh():
+    '''
+    Read refreshToken from the cache and do the refresh operation, return new accessToken.
+    '''
+
+    cached_data = read_accesstoken_cache()
+
+    try:
+        cached_data['startUrl']
+        cached_data['region']
+        cached_data['clientId']
+        cached_data['clientSecret']
+        cached_data['refreshToken']
+    except KeyError as e:
+        raise SystemExit('Error (%s): cannot do refresh: %s is missing from the cache file.' % (
+            e.__class__.__name__, e))
+
+    logging.info("--> Using SSO OIDC clientId: %s" % cached_data['clientId'])
+    logging.info("--> Using SSO OIDC clientSecret: %s" % cached_data['clientSecret'][0:60] + '...')
+    logging.info("--> Using SSO OIDC refreshToken: %s" % cached_data['refreshToken'][0:60] + '...')
+
+    # Create an SSO OIDC client
+    options.sso_region = cached_data['region']
+    sso_oidc = boto3.client('sso-oidc', region_name=options.sso_region)
+
+    # Get refreshed accessToken...
+    token_response = sso_oidc.create_token(
+        clientId =  cached_data['clientId'],
+        clientSecret =  cached_data['clientSecret'],
+        grantType = 'refresh_token',
+        refreshToken = cached_data['refreshToken']
+    )
+    token_response.pop('ResponseMetadata')
+    accessToken = token_response['accessToken']
+    refreshToken = token_response['refreshToken']
+    logging.info('--> The REFRESHED OIDC accessToken is: %s' % accessToken[0:60] + '...')
+    logging.info('--> The REFRESHED OIDC refreshToken is: %s' % (refreshToken[0:60] + '...' if (
+        refreshToken != cached_data['refreshToken']) else 'Unchanged'))
+
+    if (options.use_cache == True):
+        expiry = datetime.datetime.utcnow(
+        ) + datetime.timedelta(seconds=token_response['expiresIn'])
+        cache = {
+            'startUrl' : cached_data['startUrl'],
+            'region' : cached_data['region'],
+            'clientId' : cached_data['clientId'],
+            'clientSecret' : cached_data['clientSecret'],
+            'accessToken' : token_response['accessToken'],
+            'expiresIn' : token_response['expiresIn'],
+            'expiresAt' : expiry.strftime('%Y-%m-%dT%H:%M:%S') + 'Z',
+            'refreshToken' : token_response['refreshToken']
+        }
+
+        # Write the cache file...
+        write_accesstoken_cache(cache)
+
+    return accessToken
+
+
+def import_accesstoken_cache():
+    '''
+    Read cached data from input and import it to our internal cache.
+    '''
+
+    cached_data = read_accesstoken_cache()
+
+    try:
+        cached_data['startUrl']
+        cached_data['region']
+        cached_data['clientId']
+        cached_data['clientSecret']
+        cached_data['accessToken']
+    except KeyError as e:
+        raise SystemExit('Error (%s) %s is missing from the cache file.' % (
+            e.__class__.__name__, e))
+
+    write_accesstoken_cache(cached_data)
+
+
+def get_home_dir():
+    if os.name == "posix": # Linux, Mac
+        return os.environ["HOME"]
+    elif os.name == "nt":  # Windows
+        return os.environ["USERPROFILE"]
+    else:
+        raise NotImplementedError("Unsupported platform")
+
+
+def get_cache_dir():
+    return os.path.join(get_home_dir(), '.aws-login')
+
+
+def get_cache_filename():
+    cache_file = 'aws-accesstoken-cache.json'
+    return os.path.join(get_cache_dir(), cache_file)
+
+
+def make_cache_dir():
+    try:
+        os.makedirs(get_cache_dir(), exist_ok=True)
+    except Exception as e:
+        raise SystemExit('Error: cannot create cache dir: (%s)' % e.__class__.__name__)
+
+
+def write_accesstoken_cache(cache):
+        make_cache_dir()
+        with open(get_cache_filename(), 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=4)
+            f.write('\n')
 
 
 def parse_arn(arn):
@@ -347,6 +594,7 @@ def run():
     dumpcreds
     getcallerid
     dumpconfig
+    importcache
     '''.rstrip()
 
     usage = 'usage: %prog command [options]\n   ex: %prog console --profile "mySessionProfile"\n'
@@ -370,7 +618,7 @@ def run():
     parser.add_option('--sso-session-name', dest='sso_session_name', default='my-sso',
                       help='The sso_session identifier to use in your config file')
     parser.add_option('--sso-access-token', dest='sso_access_token', default=None,
-                      help='Use OIDC accessToken to get session credentials')
+                      help='Use the provided accessToken in lieu of new SSO login')
     parser.add_option('--sso-acct-id', dest='sso_acct_id', default=None,
                       help='Account ID for the SSO role to assume')
     parser.add_option('--sso-role-name', dest='sso_role_name', default=None,
@@ -382,8 +630,23 @@ def run():
                       help='Do not attempt to open browser')
     parser.add_option('--outform', dest='outform', default='linux',
                       help='Format to dumpcreds: linux,mac,windows,powershell (default: linux)')
+    parser.add_option('--refresh', dest='refresh', default='auto',
+                      help='OIDC accessToken refresh: on,off,auto (default: auto)')
+    parser.add_option('--use-cache', dest='use_cache', default=False,
+                      action='store_true',
+                      help='Enable accessToken caching and autorefresh')
+    parser.add_option('--accesstoken-cache', dest='accesstoken_cache', default=None,
+                      help='Use the provided accessToken cache file instead of the default file')
+    parser.add_option('--nrt', dest='nrt', default=False,
+                      action='store_true',
+                      help='Request non-refreshable accessToken type (no scopes)')
 
     (options, args) = parser.parse_args()
+
+    def need_accesstoken_cache():
+        if options.accesstoken_cache == None:
+            print('No cache file specified; use --accesstoken-cache.')
+            exit(1)
 
     operation = None
 
@@ -397,6 +660,9 @@ def run():
             operation = op
         elif op == 'dumpconfig':
             operation = op
+        elif op == 'importcache':
+            need_accesstoken_cache()
+            operation = op
         else:
             print('Unknown command: %s\n' % op)
 
@@ -408,67 +674,122 @@ def run():
     # ----------------------------------------------------------------------------------------------
     # Check input options...
     # ----------------------------------------------------------------------------------------------
-    if options.sso_acct_id != None and options.sso_role_name == None:
-        print('Option --sso-acct-id is of no use without --sso-role-name.')
-        exit(1)
-    elif options.sso_role_name != None and options.sso_acct_id == None:
-        print('Option --sso-role-name is of no use without --sso-acct-id.')
-        exit(1)
+    if (options.sso_acct_id != None and options.sso_role_name == None):
+        raise ValueError('Option --sso-acct-id is of no use without --sso-role-name.')
+
+    elif (options.sso_role_name != None and options.sso_acct_id == None):
+        raise ValueError('Option --sso-role-name is of no use without --sso-acct-id.')
+
+    elif (options.sso_role_name != None and options.sso_acct_id != None):
+        if (options.start_url == None and options.sso_access_token == None and
+                options.use_cache == False and options.accesstoken_cache == None):
+            raise ValueError(
+                'Options --sso-acct-id and --sso-role-name need --start_url or valid accessToken.')
 
     if (operation != 'dumpconfig' and options.target_arns != None):
-        print('Option --target-arns is relevant only for "dumpconfig"')
-        exit(1)
+        raise ValueError('Option --target-arns is relevant only for "dumpconfig".')
+
+    if (options.refresh != 'auto' and
+            options.accesstoken_cache == None and options.use_cache == False):
+        raise ValueError('Option --refresh only usable with --use-cache or --accesstoken-cache.')
+
+    if (options.sso_access_token != None and options.accesstoken_cache != None):
+        raise ValueError('Options --sso-access-token and --accesstoken-cache are mutually exclusive.')
+
+    if (options.sso_access_token != None and options.use_cache == True):
+        raise ValueError('Options --sso-access-token and --use-cache are mutually exclusive.')
+
+    if (options.use_cache == True and options.accesstoken_cache != None):
+        raise ValueError('Options --use-cache and --accesstoken-cache are mutually exclusive.')
+
+    try:
+        refresh_value = options.refresh.lower()
+
+        if refresh_value == 'auto':
+            options.refresh = 'auto'
+        elif refresh_value in ('off', 'false'):
+            options.refresh = 'off'
+        elif refresh_value in ('on', 'true', 'force'):
+            options.refresh = 'force'
+        else:
+            raise ValueError('Invalid value "%s" for --refresh.' % options.refresh)
+
+    except ValueError as e:
+        raise e
+
 
     # ----------------------------------------------------------------------------------------------
-    # If user opts for do_sso_login(), do that first...
+    # Determine if we need to fetch new accessToken by checking input options...
+    # - User provides --start-url, do full SSO login.
+    # - User provides --sso-access-token, use provided token.
+    # - User provides --accesstoken-cache, read token from specified cache file.
+    # - User provides --use-cache, read token from default cache file.
     # ----------------------------------------------------------------------------------------------
+    # User provides start url, do full SSO login.
+    if (options.start_url != None and
+        options.sso_access_token == None and
+        options.accesstoken_cache == None):
+
+        # Exception is dumpconfig, where --start-url + --use-cache means "read cache".
+        if (operation == 'dumpconfig' and options.use_cache == True):
+            options.accesstoken_cache = 'file://' + get_cache_filename()
+
+            if options.refresh == "force":
+                options.sso_access_token = do_accesstoken_refresh()
+            else:
+                options.sso_access_token = get_cached_accesstoken()
+
+        else:
+            if (options.sso_region == None):
+                raise ValueError('Must provide --sso-region with --start-url.')
+
+            options.sso_access_token = do_sso_login()
+
+    # User provides accessToken, skip SSO login and use that.
+    elif (options.sso_access_token != None):
+
+        # accessToken already stored in options.
+        pass
+
+    # User requests to read cache file, so use accessToken from the file.
+    elif (options.accesstoken_cache != None or options.use_cache == True):
+
+        if options.use_cache == True:
+            # A simple way to allow options --use-cache and --accesstoken-cache to coexist.
+            options.accesstoken_cache = 'file://' + get_cache_filename()
+
+        if options.refresh == "force":
+            options.sso_access_token = do_accesstoken_refresh()
+        else:
+            options.sso_access_token = get_cached_accesstoken()
+
+
+    # ----------------------------------------------------------------------------------------------
+    # At this point we MAY have new accessToken from one of above.  Now check the operation...
+    # - For console, dumpcreds, getcallerid, if we have accessToken, do get_role_credentials()
+    # - For dumpconfig, if we don't have accessToken, quit.
+    # ----------------------------------------------------------------------------------------------
+    # If we get new role credentials they will be filled here.
     role_credentials = {
         'accessKeyId': None,
         'secretAccessKey': None,
         'sessionToken': None
     }
 
-    if (operation != 'dumpconfig'):
+    if operation in ('console', 'dumpcreds', 'getcallerid'):
 
-        # If user provides start url, do full sso login.
-        if (options.start_url != None):
-
-            if (options.sso_region == None or
-                options.sso_acct_id == None or
-                options.sso_role_name == None):
-                print('Must provide --start-url, --sso-region, --sso-acct-id and --sso-role-name to do SSO login.')
-                exit(1)
-
-            role_credentials = get_oidc_role_credentials(do_sso_login())
-
-        # If user provides accessToken, skip SSO login and use token.
-        elif (options.sso_access_token != None):
-
+        if (options.sso_access_token != None):
             if (options.sso_acct_id == None or
                 options.sso_role_name == None):
-                print('Must provide --sso-acct-id and --sso-role-name to get creds with accessToken.')
-                exit(1)
+                raise ValueError(
+                    'Must provide --sso-acct-id and --sso-role-name to get creds with accessToken.')
 
             role_credentials = get_oidc_role_credentials(options.sso_access_token)
 
     elif (operation == 'dumpconfig'):
 
         if (options.sso_access_token == None):
-
-            # User must provide start url in this case, as we'll need it to get accessToken.
-            if (options.start_url == None):
-                print('Must minimally provide --start-url or --sso-access-token to proceed.')
-                exit(1)
-            else:
-                if (options.sso_region == None):
-                    print('Must provide --sso-region with --start-url.')
-                    exit(1)
-                options.sso_access_token = do_sso_login()
-
-        else:
-
-            # accessToken already stored in options.
-            pass
+            raise ValueError('Need an OIDC accessToken to proceed with "dumpconfig".')
 
 
     # ----------------------------------------------------------------------------------------------
@@ -481,11 +802,11 @@ def run():
                            ) as ctx:
 
         # We should have credentials by this point, if not:
-        if operation != 'dumpconfig':
+        if operation in ('console', 'dumpcreds', 'getcallerid'):
             credentials = ctx.session.get_credentials()
             if not hasattr(credentials, 'access_key'):
-                print('Cannot find not find any session credentials, unable continue.')
-                exit(1)
+                raise SystemExit(
+                    'Cannot find not find any session credentials, unable to continue.')
 
         # If the user opts for get-session-token, do that next
         if (options.get_session_token == True):
@@ -502,7 +823,7 @@ def run():
 
         if operation == 'console':
 
-            # Using whatever creds are in ctx.session, build the URL to open the console...
+            # Using whatever creds are in ctx.session, build the URL to open the console.
             url = construct_federated_url(ctx)
 
             print(f"Your console signin URL is: {url}")
@@ -516,8 +837,10 @@ def run():
 
         elif operation == 'dumpcreds':
 
-            dumpcreds = ''
+            # Using whatever creds are in ctx.session, extract them so we can print.
             credentials = ctx.session.get_credentials()
+
+            dumpcreds = ''
 
             if str.lower(options.outform) == 'windows':
                 dumpcreds = (f'SET AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
@@ -539,6 +862,7 @@ def run():
 
         elif operation == 'getcallerid':
 
+            # Using whatever creds are in ctx.session, display the caller identity.
             sts_client = ctx.session.client('sts')
 
             response = sts_client.get_caller_identity()
@@ -547,19 +871,64 @@ def run():
             print(json.dumps(response, indent=4, sort_keys=False, default=str))
 
 
+        elif operation == 'importcache':
+            import_accesstoken_cache()
+
+
         # ------------------------------------------------------------------------------------------
-        # Auto generate a user's AWS config file for SSO login through Identity Center.
+        # Generate a user's AWS config file for SSO login through Identity Center.
         #
         #  The program will open a browser window for you to SSO login.  Afterward, close the tab and hit
         #  return.  The program will build your config and output it to stdout.  To use, add the snip
         #  to your ".aws/config" file.
-        #
         # ------------------------------------------------------------------------------------------
         elif operation == 'dumpconfig':
 
             accessToken = options.sso_access_token
             ssoSessionName = options.sso_session_name
             startURL = options.start_url
+
+            # Create an SSO client
+            sso_client = ctx.session.client('sso', region_name=options.sso_region)
+
+            # To add autorefresh support we do a "dummy" operation here...
+            refresh_tried = False
+            while True:
+
+                try:
+                    response = sso_client.list_accounts(
+                        accessToken = accessToken,
+                        maxResults = 1,
+                    )
+
+                except sso_client.exceptions.UnauthorizedException as e:
+                    print('Error (%s) %s' % (e.__class__.__name__, e))
+
+                    if options.refresh == 'off':
+                        exit(1)
+
+                    if options.accesstoken_cache == None:
+                        raise SystemExit('Sorry, no autorefesh available :-(')
+
+                    if refresh_tried == True:
+                        print('Look, we already did accessToken refresh and still we get:')
+                        raise SystemExit('Error: accessToken not valid: (%s) %s' % (
+                            e.__class__.__name__, e))
+
+                    print('Trying auto-refresh...')
+                    refresh_tried = True
+                    try:
+                        accessToken = do_accesstoken_refresh()
+                    except Exception as ee:
+                        raise SystemExit('Error: accessToken refresh failed: (%s) %s' % (
+                            ee.__class__.__name__, ee))
+
+                except Exception as e:
+                    raise SystemExit('Error (%s) %s' % (e.__class__.__name__, e))
+
+                else:
+                    break
+
 
             print('======== ADD THE FOLLOWING TO YOUR .aws/config FILE ========')
 
@@ -570,14 +939,11 @@ def run():
             print('sso_region = %s' % options.sso_region)
             print(('sso_start_url = %s' % startURL) if (startURL != None)
                   else '# sso_start_url = https://YOUR.START.URL.HERE')
-            print('# sso_registration_scopes = sso:account:access')
+            print('sso_registration_scopes = sso:account:access')
             print('')
 
             # Build a dict keyed by "profile_name", where each value is a tuple like (accountId, roleName, region).
             sso_profiles = {}
-
-            # Create an SSO client
-            sso_client = ctx.session.client('sso', region_name=options.sso_region)
 
             paginator = sso_client.get_paginator('list_accounts')
             for page in paginator.paginate(accessToken = accessToken):

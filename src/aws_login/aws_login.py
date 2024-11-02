@@ -106,7 +106,7 @@ def get_federation_token(ctx):
 
     response = sts_client.get_federation_token(
         DurationSeconds = 3600,  # TODO make configurable
-        Name = 'aws-login',      # ditto
+        Name = options.role_sessionname,
         # Permissions are the intersection of IAM user policies and PolicyArns, see docs.
         PolicyArns = [{'arn': 'arn:aws:iam::aws:policy/AdministratorAccess'}]
     )
@@ -132,7 +132,7 @@ def assume_roles(ctx):
 
         response = sts_client.assume_role(
             RoleArn = role,
-            RoleSessionName = 'aws-login'
+            RoleSessionName = options.role_sessionname
         )
 
         # Get the credentials from the JSON response
@@ -605,6 +605,8 @@ def run():
                       help='AWS profile to use')
     parser.add_option('--assume-roles', dest='assume_roles', default=None,
                       help='Chained list of role Arns to assume')
+    parser.add_option('--role-sessionname', dest='role_sessionname', default='aws-login',
+                      help='RoleSessionName for --assume-role operations')
     parser.add_option('--get-session-token', dest='get_session_token', default=False,
                       action='store_true',
                       help='Get session credentials from static credentials')
@@ -640,6 +642,8 @@ def run():
     parser.add_option('--nrt', dest='nrt', default=False,
                       action='store_true',
                       help='Request non-refreshable accessToken type (no scopes)')
+    parser.add_option('--region', dest='region', default=None,
+                      help='AWS region')
 
     (options, args) = parser.parse_args()
 
@@ -968,7 +972,10 @@ def run():
                 print('sso_session = %s' % ssoSessionName)
                 print('sso_account_id = %s' % accountId)
                 print('sso_role_name = %s' % roleName)
-                print('# region = %s' % region)
+                if options.region != None:
+                    print('region = %s' % options.region)
+                else:
+                    print('# region = %s' % options.sso_region)
                 print('')
 
             # If user provides these, we can also generate 'assume role' target entries for this source_profile...
@@ -989,8 +996,11 @@ def run():
                             print('[profile %s-%s]' % (arn['acct_id'], arn['role_name']))
                             print('source_profile = %s' % k)
                             print('role_arn = %s' % role_arn)
-                            print('role_session_name = %s' % 'aws-login')
-                            print('# region = %s' % region)
+                            print('role_session_name = %s' % options.role_sessionname)
+                            if options.region != None:
+                                print('region = %s' % options.region)
+                            else:
+                                print('# region = %s' % options.sso_region)
                             print('')
 
 

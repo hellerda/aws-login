@@ -19,6 +19,7 @@ import pyperclip
 import sys
 import time
 import requests
+import subprocess
 import urllib.parse
 import webbrowser
 
@@ -592,6 +593,7 @@ def run():
     cmds_usage = '''\nAvailable commands:
     console
     dumpcreds
+    runas
     getcallerid
     dumpconfig
     importcache
@@ -642,14 +644,21 @@ def run():
     parser.add_option('--nrt', dest='nrt', default=False,
                       action='store_true',
                       help='Request non-refreshable accessToken type (no scopes)')
+    parser.add_option('-c', '--command', dest='command', default=None,
+                      help='Command to execute for runas')
     parser.add_option('--region', dest='region', default=None,
-                      help='AWS region')
+                      help='AWS region for runas or dumpconfig')
 
     (options, args) = parser.parse_args()
 
     def need_accesstoken_cache():
         if options.accesstoken_cache == None:
             print('No cache file specified; use --accesstoken-cache.')
+            exit(1)
+
+    def need_command():
+        if options.command == None:
+            print('No command specified; use --command.')
             exit(1)
 
     operation = None
@@ -661,6 +670,9 @@ def run():
         elif op == 'dumpcreds':
             operation = op
         elif op == 'getcallerid':
+            operation = op
+        elif op == 'runas':
+            need_command()
             operation = op
         elif op == 'dumpconfig':
             operation = op
@@ -780,7 +792,7 @@ def run():
         'sessionToken': None
     }
 
-    if operation in ('console', 'dumpcreds', 'getcallerid'):
+    if operation in ('console', 'dumpcreds', 'getcallerid', 'runas'):
 
         if (options.sso_access_token != None):
             if (options.sso_acct_id == None or
@@ -806,7 +818,7 @@ def run():
                            ) as ctx:
 
         # We should have credentials by this point, if not:
-        if operation in ('console', 'dumpcreds', 'getcallerid'):
+        if operation in ('console', 'dumpcreds', 'getcallerid', 'runas'):
             credentials = ctx.session.get_credentials()
             if not hasattr(credentials, 'access_key'):
                 raise SystemExit(
@@ -873,6 +885,32 @@ def run():
 
             response.pop('ResponseMetadata')
             print(json.dumps(response, indent=4, sort_keys=False, default=str))
+
+
+        elif operation == 'runas':
+
+            # Copy the current envionment.
+            env = os.environ.copy()
+
+            # Using whatever creds are in ctx.session, export them to the shell.
+            credentials = ctx.session.get_credentials()
+
+            env_var_set = [{'AWS_ACCESS_KEY_ID': credentials.access_key},
+                           {'AWS_SECRET_ACCESS_KEY': credentials.secret_key},
+                           {'AWS_SESSION_TOKEN': credentials.token}]
+
+            for pair in env_var_set:
+                env.update(pair)
+
+            # If not set, the command will use whatever region is set in current env.
+            if options.region != None:
+                env.update({'AWS_REGION': options.region})
+
+            command = options.command
+
+            result = subprocess.run(command, shell=True, env=env)
+
+            print('Return code: %s' % result.returncode)
 
 
         elif operation == 'importcache':

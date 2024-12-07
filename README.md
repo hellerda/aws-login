@@ -257,6 +257,27 @@ $ aws-login importcache --accesstoken-cache file://$(get-aws-oidc-accessToken-ca
 ```
 NOTE: The above examples use ```console``` but you can alternately pass ```dumpcreds```, ```getcallerid``` or ```runas``` instead.
 
+---
+
+## Using "--credential-helper"
+
+The challenge with ```runas``` (or assuming identity from ```dumpcreds``` as shown above) is that it only fetches one set of STS credentials at a time.  This makes them good for quick tasks, but if you have any job running longer than your STS token lifetime it will fail.
+
+To run with "autorefresh" you can use ```credential_process``` in a profile entry in your ```.aws/config``` or ```.aws/credentials``` file, like this:
+```
+[profile blah]
+credential_process = aws-login dumpcreds --credential-helper ...
+```
+where the remaining command line is *any* working ```dumpcreds``` command.  Simply add the ```--credential-helper``` to output in the required format.
+
+You can then consume your credentials like:
+```
+aws sts --get-caller-identity --profile blah
+```
+and the STS credentials should be refreshed as long as the command is able to do so.
+
+(NOTE: Usually it's easier to set up a standard AWS profile than using ```aws-login``` in this manner.  But it it may be useful for automation, or for programs that don't support newer AWS profile types.)
+
 
 # Part 2: Using the program to export AWS config
 

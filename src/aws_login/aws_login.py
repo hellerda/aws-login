@@ -648,6 +648,9 @@ def run():
                       help='Command to execute for runas')
     parser.add_option('--region', dest='region', default=None,
                       help='AWS region for runas or dumpconfig')
+    parser.add_option('--credential-helper', dest='credential_helper', default=False,
+                      action='store_true',
+                      help='With dumpcreds, give output for use with AWS "credential_process"')
 
     (options, args) = parser.parse_args()
 
@@ -856,24 +859,39 @@ def run():
             # Using whatever creds are in ctx.session, extract them so we can print.
             credentials = ctx.session.get_credentials()
 
-            dumpcreds = ''
+            # If invoked as --credential-helper, output in the required format and exit.
+            if options.credential_helper == True:
 
-            if str.lower(options.outform) == 'windows':
-                dumpcreds = (f'SET AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
-                             f'SET AWS_SECRET_ACCESS_KEY={credentials.secret_key}\n' +
-                             f'SET AWS_SESSION_TOKEN={credentials.token}')
-            elif str.lower(options.outform) == 'powershell':
-                dumpcreds = (f'$Env:AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
-                             f'$Env:AWS_SECRET_ACCESS_KEY={credentials.secret_key}\n' +
-                             f'$Env:AWS_SESSION_TOKEN={credentials.token}')
+                dumpcreds = {}
+
+                dumpcreds['Version'] = 1
+                dumpcreds['AccessKeyId'] = credentials.access_key
+                dumpcreds['SecretAccessKey'] = credentials.secret_key
+                dumpcreds['SessionToken'] = credentials.token
+
+                print(json.dumps(dumpcreds, indent=4, sort_keys=False, default=str))
+
+            # Else give the human-readable output.
             else:
-                dumpcreds = (f'export AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
-                             f'export AWS_SECRET_ACCESS_KEY={credentials.secret_key}\n' +
-                             f'export AWS_SESSION_TOKEN={credentials.token}')
 
-            print("# Your session credentials are...\n" + dumpcreds)
+                dumpcreds = ''
 
-            copy_url_to_clipboard(dumpcreds)
+                if str.lower(options.outform) == 'windows':
+                    dumpcreds = (f'SET AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
+                                f'SET AWS_SECRET_ACCESS_KEY={credentials.secret_key}\n' +
+                                f'SET AWS_SESSION_TOKEN={credentials.token}')
+                elif str.lower(options.outform) == 'powershell':
+                    dumpcreds = (f'$Env:AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
+                                f'$Env:AWS_SECRET_ACCESS_KEY={credentials.secret_key}\n' +
+                                f'$Env:AWS_SESSION_TOKEN={credentials.token}')
+                else:
+                    dumpcreds = (f'export AWS_ACCESS_KEY_ID={credentials.access_key}\n' +
+                                f'export AWS_SECRET_ACCESS_KEY={credentials.secret_key}\n' +
+                                f'export AWS_SESSION_TOKEN={credentials.token}')
+
+                print("# Your session credentials are...\n" + dumpcreds)
+
+                copy_url_to_clipboard(dumpcreds)
 
 
         elif operation == 'getcallerid':

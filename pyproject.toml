@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aws_login"
-version = "0.1.3"
+version = "0.1.4"
 authors = [{name = "Dave Heller", email = "techrules@pm.me"}]
 description = "A simple tool to dump session credentials or open the AWS Management Console as a given user identity"
 dependencies = ["boto3","pyperclip","urllib3","requests"]

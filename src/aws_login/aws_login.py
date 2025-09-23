@@ -567,14 +567,16 @@ def parse_arn(arn):
 # Build AWS context including boto3 session...
 # --------------------------------------------------------------------------------------------------
 class AWSContextManager:
-    def __init__(self, aws_profile, access_key, secret_key, token):
+    def __init__(self, aws_profile, region_name, access_key, secret_key, token):
         self.aws_profile = aws_profile
+        self.region_name = region_name
         self.access_key = access_key
         self.secret_key = secret_key
         self.token = token
 
     def __enter__(self):
         self.session = boto3.Session(profile_name=self.aws_profile,
+                                     region_name=self.region_name,
                                      aws_access_key_id=self.access_key,
                                      aws_secret_access_key=self.secret_key,
                                      aws_session_token=self.token)
@@ -811,10 +813,15 @@ def run():
             raise ValueError('Need an OIDC accessToken to proceed with "dumpconfig".')
 
 
+    # If AWS_DEFAULT_REGION is not set and AWS_REGION is, use the value of the latter.
+    if 'AWS_DEFAULT_REGION' not in os.environ and 'AWS_REGION' in os.environ:
+        os.environ['AWS_DEFAULT_REGION'] = os.environ['AWS_REGION']
+
     # ----------------------------------------------------------------------------------------------
     # Ops start here...
     # ----------------------------------------------------------------------------------------------
     with AWSContextManager(options.aws_profile,
+                           options.region,
                            role_credentials['accessKeyId'],
                            role_credentials['secretAccessKey'],
                            role_credentials['sessionToken']

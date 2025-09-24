@@ -161,6 +161,14 @@ def copy_url_to_clipboard(url):
 
 
 def do_sso_login():
+
+    if options.use_device_code == True:
+        return do_sso_login_devicecode()
+    else:
+        return do_sso_login_pkce()
+
+
+def do_sso_login_devicecode():
     '''
     Do the full AWS SSO login and return accessToken.
     '''
@@ -168,47 +176,56 @@ def do_sso_login():
     # Create an SSO OIDC client
     sso_oidc = boto3.client('sso-oidc', region_name=options.sso_region)
 
-    # Register the client
+    # Register the client...
+    logging.info('Calling registerClient()...')
     if options.nrt == True:
         # Crude way to request non-refreshable accessToken.
         client = sso_oidc.register_client(
             clientName = 'aws-login.py',
-            clientType = 'public'
+            clientType = 'public',
+            grantTypes = ['urn:ietf:params:oauth:grant-type:device_code']
         )
     else:
         client = sso_oidc.register_client(
             clientName = 'aws-login.py',
             clientType = 'public',
+            grantTypes = ['urn:ietf:params:oauth:grant-type:device_code'],
             scopes = ['sso:account:access']
         )
 
     # Get the client ID and client secret from the response
-    client_id = client.get('clientId')
-    client_secret = client.get('clientSecret')
+    client_id = client['clientId']
+    client_secret = client['clientSecret']
 
     # Start the device authorization flow and get the device code, user code, and verification URI
+    logging.info('Starting device-code authorization...')
     device_code_response = sso_oidc.start_device_authorization(
         clientId = client_id,
         clientSecret = client_secret,
         startUrl = options.start_url
     )
 
-    device_code = device_code_response.get('deviceCode')
-    user_code = device_code_response.get('userCode')
-    verification_uri = device_code_response.get('verificationUri')
+    device_code = device_code_response['deviceCode']
+    user_code = device_code_response['userCode']
+    verification_uri = device_code_response['verificationUri']
+
+    logging.info('User code (user must verify) is: %s' % user_code)
+    logging.info('Device code (to pass to createToken) is: %s' % device_code)
+    logging.info('Verification URI (user must access) is: %s' % verification_uri)
 
     url = f'{verification_uri}?user_code={user_code}'
 
     print(f'Your device authorization code is:\n{user_code}\n')
     print(f'Please go to {url} to authorize this device')
 
-    copy_url_to_clipboard(url)
-
     if options.no_browser == False:
         print('Attempting to automatically open browser window for URL...')
         webbrowser.open_new_tab(url)
+    else:
+        copy_url_to_clipboard(url)
 
     # Poll the token endpoint until the user completes the authorization or the code expires
+    logging.info('Polling on createToken()...')
     while True:
         try:
             # Create a token with the device code, client ID and client secret...
@@ -232,9 +249,8 @@ def do_sso_login():
             else:
                 raise e
 
-    # Get the accessToken from the response
-    accessToken = token_response.get('accessToken')
-    token_response.pop('ResponseMetadata')
+    # Get the accessToken from the response...
+    accessToken = token_response['accessToken']
 
     if (options.use_cache == True):
         expiry = datetime.datetime.utcnow(
@@ -253,6 +269,156 @@ def do_sso_login():
 
         # Write the cache file...
         write_accesstoken_cache(cache)
+
+    logging.info('Got accessToken: %s' % accessToken)
+
+    return accessToken
+
+
+def do_sso_login_pkce():
+    '''
+    Do the full AWS SSO login and return accessToken.
+    '''
+    import base64
+    import hashlib
+    import threading
+    from urllib.parse import urlencode, urlparse, parse_qs
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    # Port for local server to listen on. (should be ephemeral, really)
+    port = 8080
+
+    # Step 1: Generate the PKCE code verifier and code challenge...
+    code_verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
+    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode('utf-8')).digest()).rstrip(b'=').decode('utf-8')
+
+    # Generate the state nonce...
+    state = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode('utf-8')
+
+    logging.info('Generated code_verifier (plaintext PW) is: %s' % code_verifier)
+    logging.info('Generated code_challenge (sha256 hash) is: %s' % code_challenge)
+    logging.info('Generated session state (nonce) is: %s' % state)
+
+    # Step 2: Register the client...
+    sso_oidc = boto3.client('sso-oidc', region_name=options.sso_region)
+
+    if options.nrt == True:
+        grantTypes = ['authorization_code']
+    else:
+        grantTypes = ['authorization_code', 'refresh_token']
+
+    logging.info('Calling registerClient()...')
+    client = sso_oidc.register_client(
+        clientName = 'aws-login.py',
+        clientType = 'public',
+        grantTypes = grantTypes,
+        issuerUrl = options.start_url,
+        redirectUris = [f'http://127.0.0.1:{port}/oauth/callback'],
+        scopes = ['sso:account:access']
+        )
+
+    client_id = client['clientId']
+    client_secret = client['clientSecret']
+
+    # Step 3: Generate the authorization URL...
+    authorization_endpoint = f'https://oidc.{options.sso_region}.amazonaws.com/authorize'
+    redirect_uri = f'http://127.0.0.1:{port}/oauth/callback'
+    scopes = 'sso:account:access'
+
+    auth_url_params = {
+        'response_type': 'code',
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'state': state,
+        'code_challenge_method': 'S256',
+        'scopes': scopes,
+        'code_challenge': code_challenge,
+    }
+
+    auth_url = f'{authorization_endpoint}?{urlencode(auth_url_params)}'
+    print(f'Go to the following URL to authorize: {auth_url}')
+
+    if options.no_browser == False:
+        print('Attempting to automatically open browser window for URL...')
+        webbrowser.open_new_tab(auth_url)
+    else:
+        copy_url_to_clipboard(auth_url)
+
+    # Step 4: Start an HTTP server to catch the redirect and extract the authorization code...
+    class RequestHandler(BaseHTTPRequestHandler):
+
+        def log_message(self, format, *args):
+            # Override this method to suppress incoming requests logged to user terminal.
+            return
+
+        def do_GET(self):
+            query = urlparse(self.path).query
+            params = parse_qs(query)
+            logging.info('Query part of incoming request is: %s' % query)
+
+            global authorization_code
+
+            if 'code' in params:
+                authorization_code = params['code'][0]
+                logging.info('Response code: %s' % authorization_code)
+                logging.info('Response state: %s' % params['state'][0])
+
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'Authorization successful. You can close this window.')
+
+            else:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'Authorization code not found.')
+
+            # Send shutdown to the server thread...
+            threading.Thread(target=self.server.shutdown).start()
+
+    # Start the HTTP server...
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, RequestHandler)
+    logging.info('Starting HTTP server thread...')
+    server_thread = threading.Thread(target=httpd.serve_forever)
+    server_thread.start()
+
+    # Wait for the server thread to finish...
+    server_thread.join()
+    httpd.server_close()
+    logging.info('HTTP server stopped.')
+
+    # Step 5: Exchange the authorization code for 'accessToken'...
+    logging.info('Calling createToken()...')
+    token_response = sso_oidc.create_token(
+        clientId = client_id,
+        clientSecret = client_secret,
+        grantType = 'authorization_code',
+        code = authorization_code,
+        redirectUri = redirect_uri,
+        codeVerifier = code_verifier
+    )
+
+    accessToken = token_response['accessToken']
+
+    if (options.use_cache == True):
+        expiry = datetime.datetime.utcnow(
+        ) + datetime.timedelta(seconds=token_response['expiresIn'])
+
+        cache = {}
+        cache['startUrl'] = options.start_url
+        cache['region'] = options.sso_region
+        cache['clientId'] = client['clientId']
+        cache['clientSecret'] = client['clientSecret']
+        cache['accessToken'] = token_response['accessToken']
+        cache['expiresIn'] = token_response['expiresIn']
+        cache['expiresAt'] = expiry.strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
+        if 'refreshToken' in token_response:
+            cache['refreshToken'] = token_response['refreshToken']
+
+        # Write the cache file...
+        write_accesstoken_cache(cache)
+
+    logging.info('Got accessToken: %s' % accessToken)
 
     return accessToken
 
@@ -634,6 +800,9 @@ def run():
     parser.add_option('--no-browser', dest='no_browser', default=False,
                       action='store_true',
                       help='Do not attempt to open browser')
+    parser.add_option('--use-device-code', dest='use_device_code', default=False,
+                      action='store_true',
+                      help='Use device code authorization grant instead of PKCE')
     parser.add_option('--outform', dest='outform', default='linux',
                       help='Format to dumpcreds: linux,mac,windows,powershell (default: linux)')
     parser.add_option('--refresh', dest='refresh', default='auto',

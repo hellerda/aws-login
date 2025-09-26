@@ -6,7 +6,7 @@ A simple tool to dump session credentials or open the AWS Management Console as 
 
 Can get credentials from env, or named config, or SSO login.
 
-(c) Copyright Dave Heller 2024
+(c) Copyright Dave Heller 2025
 '''
 
 import boto3
@@ -24,6 +24,8 @@ import urllib.parse
 import webbrowser
 
 from optparse import OptionParser
+from pathlib import Path
+from urllib.parse import urlparse
 
 
 # --------------------------------------------------------------------------------------------------
@@ -125,7 +127,7 @@ def assume_roles(ctx):
     Do one or more assumeRoles on a list of Arns, update ctx.session with the final credentials.
     '''
 
-    roles = read_list_fom_input('--assume-roles', options.assume_roles)
+    roles = read_list_from_input('--assume-roles', options.assume_roles)
 
     for role in roles:
 
@@ -315,7 +317,7 @@ def do_sso_login_pkce():
         issuerUrl = options.start_url,
         redirectUris = [f'http://127.0.0.1:{port}/oauth/callback'],
         scopes = ['sso:account:access']
-        )
+    )
 
     client_id = client['clientId']
     client_secret = client['clientSecret']
@@ -478,7 +480,7 @@ def get_oidc_role_credentials(accessToken):
     return role_credentials
 
 
-def read_list_fom_input(option_name, input_value):
+def read_list_from_input(option_name, input_value):
 
     output_list = []
     payload = ''
@@ -488,16 +490,13 @@ def read_list_fom_input(option_name, input_value):
         if (input_value == ''):
             raise ValueError('Error: empty value passed to "%s".' % option_name)
 
-        loc = input_value.split('file://')
-
-        if (len(loc) == 1):
-            payload = loc[0]
-
-        elif (len(loc) == 2):
-            payload = open(loc[1], 'rt').read()
-
-        elif (len(loc) > 2):
-            raise ValueError('Error: unable to parse the value passed to "%s".' % option_name)
+        if input_value.startswith('file://'):
+            with open(file_url_to_path(input_value), 'rt') as f:
+                payload = f.read()
+            if not payload.strip():
+                raise ValueError('Input file "%s" is empty.' % file_url_to_path(input_value))
+        else:
+            payload = input_value
 
         try:
             # Valid JSON?
@@ -520,16 +519,13 @@ def read_dict_from_input(option_name, input_value):
         if (input_value == ''):
             raise ValueError('Error: empty value passed to "%s".' % option_name)
 
-        loc = input_value.split('file://')
-
-        if (len(loc) == 1):
-            payload = loc[0]
-
-        elif (len(loc) == 2):
-            payload = open(loc[1], 'rt').read()
-
-        elif (len(loc) > 2):
-            raise ValueError('Error: unable to parse the value passed to "%s".' % option_name)
+        if input_value.startswith('file://'):
+            with open(file_url_to_path(input_value), 'rt') as f:
+                payload = f.read()
+            if not payload.strip():
+                raise ValueError('Input file "%s" is empty.' % file_url_to_path(input_value))
+        else:
+            payload = input_value
 
         try:
             # Valid JSON?
@@ -549,7 +545,8 @@ def read_accesstoken_cache():
     cached_data = {}
 
     if options.accesstoken_cache == None:
-        raise ValueError('Error: Need cache file to proceed; use --accesstoken-cache.')
+        # Use default cache.  Convert to file URL so we can process thru read_dict_from_input().
+        options.accesstoken_cache = path_to_file_url(get_cache_filename())
 
     try:
         cached_data = read_dict_from_input('--accesstoken-cache', options.accesstoken_cache)
@@ -665,22 +662,57 @@ def import_accesstoken_cache():
     write_accesstoken_cache(cached_data)
 
 
-def get_home_dir():
-    if os.name == "posix": # Linux, Mac
-        return os.environ["HOME"]
-    elif os.name == "nt":  # Windows
-        return os.environ["USERPROFILE"]
-    else:
-        raise NotImplementedError("Unsupported platform")
-
-
 def get_cache_dir():
-    return os.path.join(get_home_dir(), '.aws-login')
+    home_dir = Path.home()
+    return home_dir / ".aws-login"
 
 
 def get_cache_filename():
-    cache_file = 'aws-accesstoken-cache.json'
-    return os.path.join(get_cache_dir(), cache_file)
+    return get_cache_dir() / "aws-accesstoken-cache.json"
+
+
+def is_cygwin():
+    return os.getenv('MSYSTEM') or os.getenv('TERM') == 'xterm'
+
+
+def adjust_cygwin_filepath(path):
+    if path.startswith('/tmp'):
+        try:
+            import subprocess
+            result = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[2] == '/tmp' and 'usertemp' in line:
+                    # Replace /tmp with the source path from mount table
+                    source_path = parts[0]
+                    return path.replace('/tmp', source_path, 1)
+        except:
+            pass  # Fall back to original behavior if mount command fails
+    return path
+
+
+def file_url_to_path(file_url):
+    parsed = urlparse(file_url)
+    path = parsed.path
+
+    # Cygwin workaround for /tmp usertemp filesystems
+    if is_cygwin():
+        path = adjust_cygwin_filepath(path)
+
+    # On Windows, convert /c/Users/... to C:\Users\...
+    if os.name == 'nt' and path.startswith('/') and len(path) > 1 and path[2] == '/':
+        path = path[1] + ':' + path[2:]
+    return Path(path)
+
+
+def path_to_file_url(file_path):
+    path_str = str(file_path.resolve())
+    # On Windows, convert C:\Users\... to /c/Users/...
+    if os.name == 'nt' and len(path_str) > 1 and path_str[1] == ':':
+        path_str = '/' + path_str[0].lower() + path_str[2:].replace('\\', '/')
+    else:
+        path_str = path_str.replace('\\', '/')
+    return f"file://{path_str}"
 
 
 def make_cache_dir():
@@ -691,10 +723,10 @@ def make_cache_dir():
 
 
 def write_accesstoken_cache(cache):
-        make_cache_dir()
-        with open(get_cache_filename(), 'w', encoding='utf-8') as f:
-            json.dump(cache, f, indent=4)
-            f.write('\n')
+    make_cache_dir()
+    with open(get_cache_filename(), 'w', encoding='utf-8') as f:
+        json.dump(cache, f, indent=4)
+        f.write('\n')
 
 
 def parse_arn(arn):
@@ -922,7 +954,6 @@ def run():
 
         # Exception is dumpconfig, where --start-url + --use-cache means "read cache".
         if (operation == 'dumpconfig' and options.use_cache == True):
-            options.accesstoken_cache = 'file://' + get_cache_filename()
 
             if options.refresh == "force":
                 options.sso_access_token = do_accesstoken_refresh()
@@ -943,10 +974,6 @@ def run():
 
     # User requests to read cache file, so use accessToken from the file.
     elif (options.accesstoken_cache != None or options.use_cache == True):
-
-        if options.use_cache == True:
-            # A simple way to allow options --use-cache and --accesstoken-cache to coexist.
-            options.accesstoken_cache = 'file://' + get_cache_filename()
 
         if options.refresh == "force":
             options.sso_access_token = do_accesstoken_refresh()

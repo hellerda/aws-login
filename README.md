@@ -73,9 +73,9 @@ From profile in AWS ```config``` or ```credentials``` file:
 - User specifies ```--get-federation-token``` (applies only to static creds / required for console access by IAM user)
 
 
-## Examples
+# Examples
 
-### Using environmental credentials
+## Using environmental credentials
 
 Open console with creds from environment or from specified profile:
 ```
@@ -95,14 +95,20 @@ $ aws-login console --profile "myStartingRole" --assume-roles "arn:aws:iam::2222
 $ aws-login console --profile "myStartingRole" --assume-roles "arn:aws:iam::111111111111:role/IntermediateRole, arn:aws:iam::222222222222:role/TargetRole"
 ```
 
-### Using AWS SSO login
+## Using AWS Identity Center SSO login
+
+In the examples below we show how to sign in directly to AWS Identity Center or use an `accessToken` cached from a previous sign-in.
+
+The sign-in method defaults to the newer **PKCE auth code** flow.  To force **device code** flow, pass the `--use-device-code` option.
+
+### Open AWS Console for an identity
 
 Do full AWS SSO login and open console to the account/role specified.  Role must be authorized for the user in AWS Identity Center.  Opens browser window for login.
 ```
 $ aws-login console --start-url "https://d-987654321d.awsapps.com/start" --sso-acct-id 111111111111 --sso-role-name "SSO_TargetRole"
 ```
 
-If you don't have a browser installed, you can use the ```--no-browser``` option and paste the generated URL into any browser.  (<span style="color:red">Treat the generated URL as SECRET!!</span>)
+If you don't have a browser installed, you can use the ```--no-browser``` option and paste the generated URL into any browser.  (Device code flow only.)  (<span style="color:red">Treat the generated URL as SECRET!!</span>)
 ```
 $ aws-login console --no-browser --start-url "https://d-987654321d.awsapps.com/start" --sso-acct-id 111111111111 --sso-role-name "SSO_TargetRole"
 ```
@@ -131,7 +137,7 @@ The following should work on Linux, Mac or Windows WSL:
 alias get-aws-oidc-accessToken='(cd $HOME/.aws/sso/cache/; jq -r .accessToken < $(ls -t | head -1))'
 ```
 
-## Dump credentials
+### Dump credentials for an identity
 
 Any of the above operations can be run substituting the ```dumpcreds``` command.  This dumps STS session credentials in a format ready to consume on linux, mac, windows or powershell.  Consuming these credentials, you will assume the target identity.
 ```
@@ -158,15 +164,15 @@ Assume the target identity directly:
 $ source <(aws-login dumpcreds --start-url "https://d-987654321d.awsapps.com/start" --sso-acct-id 111111111111 --sso-role-name "SSO_TargetRole")
 ```
 
-## Get caller identity
+### Get caller id for an identity
 
 Any of the above operations can be run substituting the ```getcallerid``` command.  This does an STS GetCallerIdentity() query using the acquired identity.  This is good for testing the identity before you use it.
 
 Note this displays the identity you *would* acquire by consuming the credentials, *not* the identity you have currently.  The exception would be calling ```aws-login getcallerid``` with no additional options, which reports your current identity.
 
-## Assuming an identity
+### Assuming an identity interactively
 
-Here is an example of how to assume a new identity using ```dumpcreds``` and check your acquired identity with ```getcallerid```:
+Here is an example of how to assume a new identity using ```dumpcreds``` and check your acquired identity with ```getcallerid```.  Starting with no credentials:
 ```
 $ aws-login getcallerid
 Cannot find not find any session credentials, unable to continue.
@@ -186,7 +192,9 @@ $ aws-login getcallerid
     "Account": "111111111111",
     "Arn": "arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_SSO_TargetRole_0e123456789abcde/ima.user@my.org"
 }
-
+```
+Credentials are stored in these env vars, so unsetting them will clear the credentials:
+```
 $ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 $ aws-login getcallerid
@@ -195,11 +203,11 @@ Cannot find not find any session credentials, unable to continue.
 NOTE The above example used an identity acquired from SSO login, but you can do the same with any acquired identity.
 
 
-## Using "runas"
+### Using "runas"
 
 With ```runas``` you can execute a single shell command under the acquired identity.  This effectively sets ```AWS_ACCESS_KEY_ID```, ```AWS_SECRET_ACCESS_KEY``` and ```AWS_SESSION_TOKEN```  for the duration of the command.
 
-This is useful for running commands with a given identity, without having to create a profile for that identity.
+Note this is similar to (and often easier than) assuming an identity as shown above.  The difference is, ```runas``` sets the credentials for a single invocation only.
 
 Examples using SSO login:
 ```
@@ -292,40 +300,40 @@ Note this works **exclusively** with AWS SSO login.  You either provide ```--sta
 
 Generate the file from full SSO login.  Opens browser window for login.
 ```
-$ aws-login dumpconfig --start-url "https://d-987654321d.awsapps.com/start" --sso-session-name "my-sso" --sso-region "us-east-1"
+$ aws-login dumpconfig --start-url "https://d-987654321d.awsapps.com/start" --sso-session-name "my-org" --sso-region "us-east-1"
 ```
 
 Use a cached accessToken generated externally, like from ```aws sso login```.  You don't have to do full SSO login, but, you should still provide the other options to ensure the correct values are written to your file.
 ```
-$ aws-login dumpconfig --sso-access-token $(get-aws-oidc-accessToken) --start-url "https://d-987654321d.awsapps.com/start" --sso-session-name "my-sso" --sso-region "us-east-1"
+$ aws-login dumpconfig --sso-access-token $(get-aws-oidc-accessToken) --start-url "https://d-987654321d.awsapps.com/start" --sso-session-name "my-org" --sso-region "us-east-1"
 ```
 
 Use accessToken from internal cache.
 ```
-$ aws-login dumpconfig --use-cache --start-url "https://d-987654321d.awsapps.com/start" --sso-session-name "my-sso" --sso-region "us-east-1"
+$ aws-login dumpconfig --use-cache --start-url "https://d-987654321d.awsapps.com/start" --sso-session-name "my-org" --sso-region "us-east-1"
 ```
 
 Output will be like:
 ```
 # This is your Identity Center portal entry...
-[sso-session my-sso]
+[sso-session my-org]
 sso_region = us-east-1
 sso_start_url = https://d-987654321d.awsapps.com/start
 
 # Profiles for your discovered access...
 [profile my-acct-1-AdministratorAccess]
-sso_session = my-sso
+sso_session = my-org
 sso_account_id = 111111111111
 sso_role_name = AdministratorAccess
 #region = us-east-1
 
 [profile my-acct-2-ReadOnlyAccess]
-sso_session = my-sso
+sso_session = my-org
 sso_account_id = 222222222222
 sso_role_name = ReadOnlyAccess
 #region = us-east-1
 ```
 
-**NOTE:** Although you provide ```--sso-region```, the region of the Identity Center instance, the program does not know what region you want to use for each profile entry.  By default it adds a region pointing the same as sso-region, but this entry is commented out.  If you want to use a different region you can pass the ```--region``` option, which will set the region for all entries.
+**NOTE:** Although you provide ```--sso-region```, the region of the Identity Center instance, the program does not know what region you want to use for each profile entry.  By default it adds a region pointing the same as sso-region, but this entry is commented out.  If you want to use a different region you can pass the ```--region``` option, which will set the region for all profiles.
 
-Unfortunately there is no way to set a per-entry value.  If you need to set a different regions for different profiles, edit the file accordingly.
+Unfortunately there is no way to set a per-profile value.  If you need to set a different regions for different profiles, edit the file accordingly.

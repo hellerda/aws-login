@@ -109,7 +109,7 @@ def get_federation_token(ctx):
 
     response = sts_client.get_federation_token(
         DurationSeconds = 3600,  # TODO make configurable
-        Name = options.role_sessionname,
+        Name = options.role_session_name,
         # Permissions are the intersection of IAM user policies and PolicyArns, see docs.
         PolicyArns = [{'arn': 'arn:aws:iam::aws:policy/AdministratorAccess'}]
     )
@@ -135,7 +135,7 @@ def assume_roles(ctx):
 
         response = sts_client.assume_role(
             RoleArn = role,
-            RoleSessionName = options.role_sessionname
+            RoleSessionName = options.role_session_name
         )
 
         # Get the credentials from the JSON response
@@ -729,6 +729,11 @@ def write_accesstoken_cache(cache):
         f.write('\n')
 
 
+def quote_if_needed(s):
+    quote_char = "'"  # single-tick quotes
+    return f'{quote_char}{s}{quote_char}' if ' ' in s else s
+
+
 def parse_arn(arn):
     '''
     Parse an AWS IAM role Arn into its constituent bits.
@@ -807,7 +812,7 @@ def run():
                       help='AWS profile to use')
     parser.add_option('--assume-roles', dest='assume_roles', default=None,
                       help='Chained list of role Arns to assume')
-    parser.add_option('--role-sessionname', dest='role_sessionname', default='aws-login',
+    parser.add_option('--role-session-name', dest='role_session_name', default='aws-login',
                       help='RoleSessionName for --assume-role operations')
     parser.add_option('--get-session-token', dest='get_session_token', default=False,
                       action='store_true',
@@ -827,7 +832,7 @@ def run():
                       help='Account ID for the SSO role to assume')
     parser.add_option('--sso-role-name', dest='sso_role_name', default=None,
                       help='The SSO role (permission set) to')
-    parser.add_option('--target-arns', dest='target_arns', default=None,
+    parser.add_option('--target-arn-profiles', dest='target_arn_profiles', default=None,
                       help='List of target Arns for "assume role" profile entries (dumpconfig only)')
     parser.add_option('--no-browser', dest='no_browser', default=False,
                       action='store_true',
@@ -908,8 +913,8 @@ def run():
             raise ValueError(
                 'Options --sso-acct-id and --sso-role-name need --start_url or valid accessToken.')
 
-    if (operation != 'dumpconfig' and options.target_arns != None):
-        raise ValueError('Option --target-arns is relevant only for "dumpconfig".')
+    if (operation != 'dumpconfig' and options.target_arn_profiles != None):
+        raise ValueError('Option --target-arn-profiles is relevant only for "dumpconfig".')
 
     if (options.refresh != 'auto' and
             options.accesstoken_cache == None and options.use_cache == False):
@@ -1220,9 +1225,11 @@ def run():
                     ):
                         for role in page['roleList']:
 
-                            profile_name = f'{acct["accountName"]}-{role["roleName"]}'
-                            sso_profiles.setdefault(profile_name,
-                                                    (acct['accountId'], role['roleName'], options.sso_region))
+                            profile_name = '%s-%s' % (acct['accountName'], role['roleName'])
+                            profile_name = quote_if_needed(profile_name)
+
+                            sso_profiles.setdefault(
+                                profile_name, (acct['accountId'], role['roleName'], options.sso_region))
 
             # Dump all profile entries...
             for k, v in sorted(sso_profiles.items()):
@@ -1237,30 +1244,57 @@ def run():
                     print('# region = %s' % options.sso_region)
                 print('')
 
-            # If user provides these, we can also generate 'assume role' target entries for this source_profile...
-            if (options.sso_acct_id != None and
-                options.sso_role_name != None and
-                options.target_arns != None):
+            # Generate additional profile entries for "assume role" targets, if provided...
+            for profile in read_list_from_input('--target-arn-profiles', options.target_arn_profiles):
 
-                # Scan the previously generated list to see if we have a matching source profile...
+                match_found = False
+
+                try:
+                    # Check for required fields in the input data.
+                    profile['SourceAccountID']
+                    profile['SourceRoleName']
+                    profile['TargetArn']
+                except KeyError as e:
+                    raise SystemExit(
+                        'Error (%s): cannot create --target-arn-profiles: %s is missing from the profile entry.' % (
+                            e.__class__.__name__, e))
+
+                # Scan the list of SSO profiles to see if we have a matching source profile.
                 for k, v in sorted(sso_profiles.items()):
                     (accountId, roleName, region) = v
 
-                    if options.sso_acct_id == accountId and options.sso_role_name == roleName:
+                    if (profile['SourceAccountID'], profile['SourceRoleName']) == (accountId, roleName):
 
-                        for role_arn in read_list_fom_input('--target-arns', options.target_arns):
+                        arn = parse_arn(profile['TargetArn'])
 
-                            arn = parse_arn(role_arn)
+                        if 'TargetAccountName' in profile and profile['TargetAccountName'] not in (''):
+                            profile_name = '%s-%s' % (profile['TargetAccountName'], arn['role_name'])
+                        else:
+                            profile_name = '%s-%s' % (arn['acct_id'], arn['role_name'])
 
-                            print('[profile %s-%s]' % (arn['acct_id'], arn['role_name']))
-                            print('source_profile = %s' % k)
-                            print('role_arn = %s' % role_arn)
-                            print('role_session_name = %s' % options.role_sessionname)
-                            if options.region != None:
-                                print('region = %s' % options.region)
-                            else:
-                                print('# region = %s' % options.sso_region)
-                            print('')
+                        print('[profile %s]' % quote_if_needed(profile_name))
+                        print('source_profile = %s' % k)
+                        print('role_arn = %s' % profile['TargetArn'])
+                        print('role_session_name = %s' % options.role_session_name)
+
+                        if 'Region' in profile and profile['Region'] not in ('', []):
+                            print('region = %s' % profile['Region'])
+                        elif options.region != None:
+                            print('region = %s' % options.region)
+                        else:
+                            print('# region = %s' % options.sso_region)
+
+                        print('sso_session = %s' % ssoSessionName)
+                        print('')
+
+                        match_found = True
+
+                        break
+
+                # Return error if no source profile found for this target.
+                if not match_found:
+                    raise SystemExit('No matching SSO profile "%s" in "%s" for target: %s' % (
+                        profile['SourceRoleName'], profile['SourceAccountID'], profile['TargetArn']))
 
 
 

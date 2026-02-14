@@ -28,7 +28,7 @@ You can do the following with AWS Identity Center sign-in or ```accessToken``` f
 $ pip install setuptools build
 $ cd <project directory>
 $ python -m build
-$ pip install ./dist/aws_login-0.1.0-py3-none-any.whl
+$ pipx install ./dist/aws_login-0.1.0-py3-none-any.whl
 ```
 
 You will now have the ```aws-login``` executable installed.  If not found, run ```pip show aws-login``` and check the installed Location.  The executable should be installed in the ```./bin``` directory that is the peer of the displayed ```./lib``` directory.  Make sure this directory is in your path.
@@ -336,4 +336,57 @@ sso_role_name = ReadOnlyAccess
 
 **NOTE:** Although you provide ```--sso-region```, the region of the Identity Center instance, the program does not know what region you want to use for each profile entry.  By default it adds a region pointing the same as sso-region, but this entry is commented out.  If you want to use a different region you can pass the ```--region``` option, which will set the region for all profiles.
 
-Unfortunately there is no way to set a per-profile value.  If you need to set a different regions for different profiles, edit the file accordingly.
+Unfortunately there is no way to set a per-profile value.  (Except for "assume-role" profiles, see below.)  If you need to set a different regions for different profiles, edit the file accordingly.
+
+
+## Adding assume-role profiles to dumpconfig
+
+While AWS Identity Center does not support direct SSO access to conventional IAM roles, you can emulate this function by doing an assume-role from an Identity Center provisioned role to a conventional IAM role.  To do this, simply create a permission set with inline policy allowing the assume-role, and modify the trust policy of the target role to allow the assume-role.
+
+Unfortunately, the additional profile entries are not "discoverable" by the Identity Center user, so the program can't generate them automatically.  Instead, you provide a JSON file containing the entries you want to add.  It works like this:
+
+First, prepare a JSON list of entries you want to add, where each entry is a map representing the profile you want to generate:
+
+- SourceAccountID - Account where the permission set is provisioned (required)
+- SourceRoleName - Name of the permission set (required)
+- TargetArn - The IAM role you want to assume (required)
+- TargetAccountName - A friendly name for target account, to be used in the profile name (optional)
+- Region - AWS region for this profile (optional)
+
+Here's an example file with one entry:
+```
+$ cat /tmp/target-arn-list.json
+[
+  {
+    "SourceAccountID": "111111111111",
+    "SourceRoleName": "assume_role_ps1",
+    "TargetArn": "arn:aws:iam::222222222222:role/LegacyIAMRole1",
+    "TargetAccountName": "target-account-1",
+    "Region": "us-east-2"
+  }
+]
+```
+
+Pass the list using the `--target-arn-profiles` option:
+```
+$ aws-login dumpconfig --use-cache \
+--start-url "https://d-987654321d.awsapps.com/start" \
+--sso-session-name "my-org" \
+--sso-region "us-east-1" \
+--target-arn-profiles file:///tmp/target-arn-list.json
+```
+
+The program will generate an *additional* profile entry like below.  Note that `source profile` points to one of the automatically generated profiles, which is the profile of the permission set that will do the assume-role to the target.  Create the permission set *first* so the entry will already be present.
+```
+[profile target-account-1-LegacyIAMRole1]
+source_profile = my-source-account-assume-role-ps1
+role_arn = arn:aws:iam::222222222222:role/LegacyIAMRole1
+role_session_name = aws-login
+region = us-west-2
+```
+
+When the user assumes profile "target-account-1-LegacyIAMRole1", they will acquire the identity of the *target role*.  They do NOT have to assume the source role manually; this is done automatically when they assume the target profile. 
+
+NOTE: The account where the IdC permission set is deployed (`SourceAccountID`) CAN be the same as the account where `TargetArn` resides, but it does not have to be.
+
+NOTE: It is possible for the same assume-role permission set to support more than one target arn.  In this case you have multiple profile entries with different `TargetArn` but the same `SourceAccountID` and `SourceRoleName`.

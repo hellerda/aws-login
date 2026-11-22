@@ -1,0 +1,51 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - '**'  # Trigger on all branches (including feature branches)
+    tags:
+      - 'v*'  # Trigger on version tags
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest  # GitHub-hosted runner
+    permissions:
+      contents: write  # Required to create releases
+
+    steps:
+      # Step 1: Clone the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Install Python 3.11
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Step 3: Install build tools
+      - name: Install build dependencies
+        run: |
+          pip install --upgrade pip
+          pip install build
+
+      # Step 4: Build Python wheel package
+      - name: Build wheel
+        run: python -m build  # Creates dist/*.whl
+
+      # Step 5: Store wheel as artifact (available for download from workflow run)
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: dist/*.whl
+          retention-days: 90  # Artifacts expire after 90 days
+
+      # Step 6: Create GitHub Release (only for tag pushes)
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')  # Only run if triggered by a tag
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*.whl  # Attach wheel to release
+          generate_release_notes: true  # Auto-generate changelog from commits

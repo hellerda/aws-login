@@ -22,13 +22,33 @@ You can do the following with AWS Identity Center sign-in or ```accessToken``` f
   * ```dumpconfig``` command - Generate profiles for all your currently assigned IdC access.
 
 
-# Build and install
+## Build and install
 
+[pipx](https://pipx.pypa.io/) install is recommended, as it will automatically handle dependencies:
+
+```bash
+# Install pipx if you don't have it
+python -m pip install --user pipx
+python -m pipx ensurepath
+
+# Build and install with pipx
+cd ./aws-login/
+pipx run build
+pipx install ./dist/aws_login-n.n.n-py3-none-any.whl
 ```
-$ pip install setuptools build
-$ cd <project directory>
-$ python -m build
-$ pipx install ./dist/aws_login-0.1.0-py3-none-any.whl
+
+## NEW: Install latest release
+
+In lieu of building from source you can *download the ready-to-install package*.  Look for "Releases" on the right-hand side of this project and download the `.whl` for the latest release.
+
+```bash
+# Install pipx if you don't have it
+python -m pip install --user pipx
+python -m pipx ensurepath
+
+# Download package and install with pipx
+cd /directory/where/downloaded/
+pipx install aws_login-n.n.n-py3-none-any.whl
 ```
 
 You will now have the ```aws-login``` executable installed.  If not found, run ```pip show aws-login``` and check the installed Location.  The executable should be installed in the ```./bin``` directory that is the peer of the displayed ```./lib``` directory.  Make sure this directory is in your path.
@@ -207,7 +227,7 @@ NOTE The above example used an identity acquired from SSO login, but you can do 
 
 With ```runas``` you can execute a single shell command under the acquired identity.  This effectively sets ```AWS_ACCESS_KEY_ID```, ```AWS_SECRET_ACCESS_KEY``` and ```AWS_SESSION_TOKEN```  for the duration of the command.
 
-Note this is similar to (and often easier than) assuming an identity as shown above.  The difference is, ```runas``` sets the credentials for a single invocation only.
+This is useful for running commands with a given identity, without having to create a profile for that identity.
 
 Examples using SSO login:
 ```
@@ -385,7 +405,7 @@ role_session_name = aws-login
 region = us-west-2
 ```
 
-When the user assumes profile "target-account-1-LegacyIAMRole1", they will acquire the identity of the *target role*.  They do NOT have to assume the source role manually; this is done automatically when they assume the target profile. 
+When the user assumes profile "target-account-1-LegacyIAMRole1", they will acquire the identity of IAM role "LegacyIAMRole1" in account "222222222222".
 
 NOTE: The account where the IdC permission set is deployed (`SourceAccountID`) CAN be the same as the account where `TargetArn` resides, but it does not have to be.
 
